@@ -1,4 +1,5 @@
 import csv
+import re
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -232,7 +233,7 @@ class StockTrades:
             print("---open trades---")
             for trade in trades:
                 print(trade)
-                print(",".join(trade.get_row()))
+                print(trade.get_row())
             print("---sell--queue---")
             while not sq.empty():
                 print(sq.get().get_row())
@@ -292,7 +293,7 @@ class StockTrades:
                     print("---open-options---")
                     for trade in trades:
                         print(trade)
-                        print(",".join(trade.get_row()))
+                        print(trade.get_row())
                     raise ValueError(f"{opt_id} quantity {q} open")
 
 class StockCsvReader:
@@ -321,7 +322,7 @@ class StockCsvReader:
         self.rows = []
         for csv_file in self.csv_files:
             with open(csv_file) as f:
-                reader = csv.DictReader(f)
+                reader = csv.DictReader(f, skipinitialspace=True)
                 self.rows += list(reader)
 
         for row in self.rows:
@@ -395,6 +396,38 @@ class StockCsvReader:
 
         print(f"Grand total --- short {short_total:.2f} long {long_total:.2f}")
 
+
+class FidelityCsvReader(StockCsvReader):
+    CLOSE_OPTIONS = False
+    def fill_trade(self, trade, row):
+        print(row)
+        trade.date = datetime.strptime(row['Run Date'], '%m/%d/%Y').date()
+        trade.quantity = Decimal(row['Quantity']) # fractional shares
+        amount = Decimal(row['Amount ($)']) # todo: may be store amount, fidelity also has price
+        trade.price = amount/trade.quantity
+
+
+        symbol = row['Symbol']
+        # fidelity have different option symbols at different time
+        # may be due to change from fb to meta
+        # anyway lets just parse desc like
+        #" CALL (FB) META PLATFORMS INC JAN 19 24 $250 (100 SHS)"
+        desc = row['Security Description'].strip()
+        if desc.startswith('CALL') or desc.startswith('PUT'):
+            m = re.match(r"(?P<opt_type>\w+) \((?P<symbol>\w+)\) (?P<desc_date>.*) \$(?P<strike>\d+\.?\d*) .*", desc)
+            m = m.groupdict()
+            option_type = m['opt_type'].lower()
+            strike = Decimal(m['strike'])
+            trade.symbol = m['symbol']
+            # sometime date is like 'class AJAN 20 22'
+            option_date = m['desc_date'].strip()[-9:]
+            option_date = datetime.strptime(option_date, "%b %d %y").date()
+            trade.security_type = 'option'
+            trade.option = StockOption(trade.symbol, option_type, strike, option_date)
+        else:
+            trade.security_type = 'stock'
+            trade.symbol = symbol
+        return trade
 
 class EtradeCsvReader(StockCsvReader):
     CLOSE_OPTIONS = False
