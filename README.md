@@ -1,1 +1,1 @@
-Rough capital gains calculations from etrad/chase txn csv
+Rough capital gains calculations from etrade, chase etc txn csv
