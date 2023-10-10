@@ -83,6 +83,10 @@ class StockTrade:
             raise ValueError(f"{value} should be one on of {self.SECURITY_TYPES}")
         self._security_type = value
 
+    def get_row(self):
+        """return csv line"""
+        return ",".join(self.row.values())
+
     def match(self, trade):
         """
         match this trade with another
@@ -153,9 +157,9 @@ class TradePair:
 
 class StockTrades:
 
-    def __init__(self, symbol, close_options=True):
+    def __init__(self, reader, symbol):
+        self.reader = reader
         self.symbol = symbol
-        self.close_options = close_options
         self.stock_trades = []
         self.opt_trade_map = {}
 
@@ -225,6 +229,16 @@ class StockTrades:
                     sq.put(trade)
 
         if not sq.empty() or not bq.empty():
+            print("---open trades---")
+            for trade in trades:
+                print(trade)
+                print(",".join(trade.get_row()))
+            print("---sell--queue---")
+            while not sq.empty():
+                print(sq.get().get_row())
+            print("---buy--queue---")
+            while not bq.empty():
+                print(bq.get().get_row())
             raise ValueError(f"queue not empty, check for missing open/close txns,  initial trades {len(trades)}")
         return pairs
 
@@ -257,7 +271,7 @@ class StockTrades:
                 # lets flip confusion sign
                 for trade in trades:
                     if trade.trade_type == 'confusion':
-                        print("--flip-conufsion---")
+                        print(f"--flip-confusion--- {trade}")
                         trade.quantity = -trade.quantity
 
         # go thru options see if they are closed
@@ -267,7 +281,7 @@ class StockTrades:
                 q += trade.quantity
             if q != 0:
                 # doing this for chase which doesn't have expired options
-                if self.close_options:
+                if self.reader.CLOSE_OPTIONS:
                     print(f"WARN: {opt_id} quantity {q} closing it")
                     trade = trades[0].copy()
                     trade.quantity = -q
@@ -275,21 +289,35 @@ class StockTrades:
                     trade.fake = True
                     trades.append(trade)
                 else:
+                    print("---open-options---")
+                    for trade in trades:
+                        print(trade)
+                        print(",".join(trade.get_row()))
                     raise ValueError(f"{opt_id} quantity {q} open")
 
 class StockCsvReader:
     CLOSE_OPTIONS = True
-    def __init__(self, csv_files, filter_symbols=None):
+    def __init__(self, csv_files, open_file, filter_symbols=None, ignore_symbols=None):
         self.csv_files = csv_files
+        self.open_file = open_file
         self.trade_map = {}
         self.filter_symbols = filter_symbols
+        self.ignore_symbols = ignore_symbols
         self.load()
 
-    def get_trade(self, row):
+    def fill_trade(self, trade, row):
         # derived class so override it
         raise NotImplementedError
 
     def load(self):
+        # load file to read trades which are open at year end
+        # keep a list as there could be exact same trades
+        self.open_entries = []
+        if self.open_file:
+            with open(self.open_file) as f:
+                reader = csv.DictReader(f)
+                self.open_entries = [str(r) for r in reader]
+
         self.rows = []
         for csv_file in self.csv_files:
             with open(csv_file) as f:
@@ -297,11 +325,22 @@ class StockCsvReader:
                 self.rows += list(reader)
 
         for row in self.rows:
-            trade = self.get_trade(row)
+            # does it slow down?
+            if self.open_entries:
+                try:
+                    self.open_entries.remove(str(row))
+                    print(f"removed {row}")
+                    continue
+                except ValueError:
+                    pass
+            trade = StockTrade(row)
+            self.fill_trade(trade, row)
             if self.filter_symbols and trade.symbol not in self.filter_symbols:
                 continue
+            if self.ignore_symbols and trade.symbol in self.ignore_symbols:
+                continue
             if trade.symbol not in self.trade_map:
-                self.trade_map[trade.symbol] = StockTrades(trade.symbol, self.CLOSE_OPTIONS)
+                self.trade_map[trade.symbol] = StockTrades(self, trade.symbol)
             self.trade_map[trade.symbol].add(trade)
 
         for trades in self.trade_map.values():
@@ -346,8 +385,9 @@ class StockCsvReader:
         short_total = 0
         long_total = 0
         for symbol, totals in symbol_gains.items():
-            print(f"{symbol} short {totals['short']:.2f} long {totals['long']:.2f}")
+            print(f"{symbol} stock short {totals['short']:.2f} long {totals['long']:.2f}")
             print(f"{symbol} options short {totals['opt_short']:.2f} long {totals['opt_long']:.2f}")
+            print(f"{symbol} total short {totals['short']+totals['opt_short']:.2f} long {totals['long']+totals['opt_long']:.2f}")
             short_total += totals['short']
             short_total += totals['opt_short']
             long_total += totals['long']
@@ -358,8 +398,7 @@ class StockCsvReader:
 
 class EtradeCsvReader(StockCsvReader):
     CLOSE_OPTIONS = False
-    def get_trade(self, row):
-        trade = StockTrade(row)
+    def fill_trade(self, trade, row):
         security = row['Security']
         if security.find('CALL') > 0 or security.find('PUT') > 0:
             trade.security_type = 'option'
@@ -380,6 +419,9 @@ class EtradeCsvReader(StockCsvReader):
             trade_type = 'confusion'
         if trade_type == 'option assignment':
             # conside option assignment as cost basis 0 option
+            # etrade actually adds premium to the assigned stock
+            # and ignore the option totally, but we calculate
+            # profit loss on option
             trade_type = 'buy'
         trade_type = trade_type.split()[0]
         if trade_type not in ['buy', 'sell', 'confusion']:
@@ -397,12 +439,11 @@ class EtradeCsvReader(StockCsvReader):
         return trade
 
 class ChaseCsvReader(StockCsvReader):
-    def get_trade(self, row):
+    def fill_trade(self, trade, row):
         """
         any hadncrafted csv for extra txns should have
         Security Type, Type, Ticker, Description, Trade Date, Quantity, Price Local, Amount Local
         """
-        trade = StockTrade(row)
         trade.security_type = row['Security Type'].lower()
         #trade.trade_type = row['Type'].lower()  # we just use quantity
         ticker = row['Ticker']
@@ -430,31 +471,38 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Calc some gainz.')
     parser.add_argument('csv_files', type=str, nargs='+',
                         help='csv transcation files')
-    parser.add_argument('--csv-type', dest='csv_type', choices=['etrade', 'chase'],
+    parser.add_argument('--csv-type', dest='csv_type', choices=['etrade', 'chase', 'fidelity'],
                         default='etrade', help='type of csv files')
-    parser.add_argument('--symbol', help='filter by symbol', nargs='*')
+    parser.add_argument('--symbol', help='filter by symbol', action='append')
+    parser.add_argument('--ignore', help='ignore symbol', action='append')
+    parser.add_argument('--open', help='open trades to ignore, file which lists trades to be removed')
 
     args = parser.parse_args()
     if args.csv_type == 'chase':
-        er = ChaseCsvReader(args.csv_files, args.symbol)
+        klass = ChaseCsvReader
     elif args.csv_type == 'etrade':
-        er = EtradeCsvReader(args.csv_files, args.symbol)
+        klass = EtradeCsvReader
+    elif args.csv_type == 'fidelity':
+        klass = FidelityCsvReader
+
+    reader = klass(args.csv_files, args.open, args.symbol, args.ignore)
+
     # output csv file in format for https://github.com/nkouevda/capital-gains
     f = open("/tmp/1.csv", "w+")
     cw = csv.writer(f)
     cw.writerow(["date","symbol","name","shares","price","fee"])
     if False:
-        for trades in er.trade_map.values():
+        for trades in reader.trade_map.values():
             for opt_id, opt_trades in trades.opt_trade_map.items():
                 for trade in opt_trades:
                     print(trade)
                     cw.writerow([trade.date, opt_id, "", trade.quantity, trade.price, 0])
     else:
-        for trades in er.trade_map.values():
+        for trades in reader.trade_map.values():
             for trade in trades.stock_trades:
                 print(trade)
                 cw.writerow([trade.date, trade.symbol, "", trade.quantity, trade.price, 0])
     f.close()
 
-    er.capital_gains()
+    reader.capital_gains()
 
