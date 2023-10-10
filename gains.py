@@ -359,7 +359,6 @@ class StockCsvReader:
 class EtradeCsvReader(StockCsvReader):
     CLOSE_OPTIONS = False
     def get_trade(self, row):
-        """{'Trade Date': '1/5/2022', 'Order Type': 'Buy To Close', 'Security': "FB JAN 07 '22 $347.50 CALL", 'Cusip': '', 'Transaction Description': "40     FB JAN 07 '22          $347.50 CALL(FB)              META PLATFORMS INC CL A       COVER SHORT", 'Quantity': '40', 'Executed Price': '0.08', 'Commission': '0.0000', 'Net Amount': '320.38'}"""
         trade = StockTrade(row)
         security = row['Security']
         if security.find('CALL') > 0 or security.find('PUT') > 0:
